@@ -454,7 +454,7 @@ class Miniterm(object):
                         for transformation in self.rx_transformations:
                             text = transformation.rx(text)
                         self.currentRecievedString += text
-                        if text=='\n':
+                        if text=='\n' or text=='\r' or text=='\r\n':
                             self.console.write(self.currentRecievedString)
                             if self.execute:
                                 call(self.currentRecievedString, shell=True)
@@ -498,7 +498,7 @@ class Miniterm(object):
                     for transformation in self.tx_transformations:
                     	echo_text = transformation.echo(echo_text)
                     self.console.write(echo_text)
-		    if c=='\n':
+		    if c=='\n' or c=='\r' or c=='\r\n':
 			for transformation in self.tx_transformations:
                     	    self.currentTextString = transformation.tx(self.currentTextString)
                     	self.serial.write(self.tx_encoder.encode(self.currentTextString))
