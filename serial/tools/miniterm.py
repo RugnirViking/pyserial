@@ -354,6 +354,7 @@ class Miniterm(object):
         self.receiver_thread = None
         self.rx_decoder = None
         self.tx_decoder = None
+	self.currentTextString = ""
 
     def _start_reader(self):
         """Start reader thread"""
@@ -455,7 +456,6 @@ class Miniterm(object):
             self.alive = False
             self.console.cancel()
             raise       # XXX handle instead of re-raise?
-
     def writer(self):
         """\
         Loop and copy console->serial until self.exit_character character is
@@ -481,15 +481,18 @@ class Miniterm(object):
                     break
                 else:
                     #~ if self.raw:
-                    text = c
+		    text = c
+		    self.currentTextString+=text
+		    echo_text = c
                     for transformation in self.tx_transformations:
-                        text = transformation.tx(text)
-                    self.serial.write(self.tx_encoder.encode(text))
-                    if self.echo:
-                        echo_text = c
-                        for transformation in self.tx_transformations:
-                            echo_text = transformation.echo(echo_text)
-                        self.console.write(echo_text)
+                    	echo_text = transformation.echo(echo_text)
+                    self.console.write(echo_text)
+		    if c=='\n':
+			for transformation in self.tx_transformations:
+                    	    self.currentTextString = transformation.tx(self.currentTextString)
+                    	self.serial.write(self.tx_encoder.encode(self.currentTextString))
+			self.currentTextString=""
+                    	
         except:
             self.alive = False
             raise
