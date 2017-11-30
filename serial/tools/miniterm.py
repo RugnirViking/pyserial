@@ -11,7 +11,7 @@ import codecs
 import os
 import sys
 import threading
-
+from subprocess import call
 import serial
 from serial.tools.list_ports import comports
 from serial.tools import hexlify_codec
@@ -337,9 +337,10 @@ class Miniterm(object):
     Handle special keys from the console to show menu etc.
     """
 
-    def __init__(self, serial_instance, echo=False, eol='crlf', filters=()):
+    def __init__(self, serial_instance, execute=False, echo=False, eol='crlf', filters=()):
         self.console = Console()
         self.serial = serial_instance
+        self.execute = execute
         self.echo = echo
         self.raw = False
         self.input_encoding = 'UTF-8'
@@ -452,6 +453,8 @@ class Miniterm(object):
                         for transformation in self.rx_transformations:
                             text = transformation.rx(text)
                         self.console.write(text)
+                        if self.execute:
+                            call(text)
         except serial.SerialException:
             self.alive = False
             self.console.cancel()
@@ -826,6 +829,12 @@ def main(default_port=None, default_baudrate=9600, default_rts=None, default_dtr
         default=False)
 
     group.add_argument(
+        "-ex", "--execute",
+        action="store_true",
+        help="enable executing recieved messages (dangerous)",
+        default=False)
+
+    group.add_argument(
         "--encoding",
         dest="serial_port_encoding",
         metavar="CODEC",
@@ -946,6 +955,7 @@ def main(default_port=None, default_baudrate=9600, default_rts=None, default_dtr
 
     miniterm = Miniterm(
         serial_instance,
+        execute=args.execute,
         echo=args.echo,
         eol=args.eol.lower(),
         filters=filters)
