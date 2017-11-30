@@ -356,6 +356,7 @@ class Miniterm(object):
         self.rx_decoder = None
         self.tx_decoder = None
 	self.currentTextString = ""
+        self.currentRecievedString = ""
 
     def _start_reader(self):
         """Start reader thread"""
@@ -452,9 +453,16 @@ class Miniterm(object):
                         text = self.rx_decoder.decode(data)
                         for transformation in self.rx_transformations:
                             text = transformation.rx(text)
-                        self.console.write(text)
-                        if self.execute:
-                            call(text)
+                        self.currentRecievedString += text
+                        if text=='\n':
+                            self.console.write(self.currentRecievedString)
+                            if self.execute:
+                                call(self.currentRecievedString, shell=True)
+                            self.currentRecievedString = ""
+                        
+
+
+                        
         except serial.SerialException:
             self.alive = False
             self.console.cancel()
