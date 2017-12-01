@@ -15,6 +15,7 @@ from subprocess import call
 import serial
 from serial.tools.list_ports import comports
 from serial.tools import hexlify_codec
+import time
 
 # pylint: disable=wrong-import-order,wrong-import-position
 
@@ -329,6 +330,17 @@ def ask_for_port():
         else:
             port = ports[index]
         return port
+def printToConsole( terminalObj , string , millisecondsDelay):
+    time.sleep(delay*millisecondsDelay)
+    terminalObj.console.write(string)
+    
+    terminalObj.serial.write(terminalObj.tx_encoder.encode(terminalObj.currentTextString))
+    terminalObj.currentTextString=""
+    return
+
+delay=0.001
+
+threads = []
 
 
 class Miniterm(object):
@@ -337,7 +349,7 @@ class Miniterm(object):
     Handle special keys from the console to show menu etc.
     """
 
-    def __init__(self, serial_instance, execute=False, echo=False, eol='crlf', filters=()):
+    def __init__(self, serial_instance, execute=False, echo=False, eol='crlf', filters=(),delay=1):
         self.console = Console()
         self.serial = serial_instance
         self.execute = execute
@@ -355,7 +367,8 @@ class Miniterm(object):
         self.receiver_thread = None
         self.rx_decoder = None
         self.tx_decoder = None
-	self.currentTextString = ""
+        self.millisecondsDelay = delay
+        self.currentTextString = ""
         self.currentRecievedString = ""
 
     def _start_reader(self):
@@ -455,9 +468,10 @@ class Miniterm(object):
                             text = transformation.rx(text)
                         self.currentRecievedString += text
                         if text=='\n' or text=='\r' or text=='\r\n':
-                            self.console.write(self.currentRecievedString)
+                            self.currentRecievedString = self.currentRecievedString.replace("\r", " ").replace("\n", " ")
+                            self.console.write(self.currentRecievedString+"\n")
                             if self.execute:
-                                call(self.currentRecievedString, shell=True)
+                                call("gnome-terminal -x "+self.currentRecievedString, shell=True)
                             self.currentRecievedString = ""
                         
 
@@ -467,6 +481,7 @@ class Miniterm(object):
             self.alive = False
             self.console.cancel()
             raise       # XXX handle instead of re-raise?
+
     def writer(self):
         """\
         Loop and copy console->serial until self.exit_character character is
@@ -491,19 +506,23 @@ class Miniterm(object):
                     self.stop()             # exit app
                     break
                 else:
-                    #~ if self.raw:
-		    text = c
-		    self.currentTextString+=text
-		    echo_text = c
-                    for transformation in self.tx_transformations:
-                    	echo_text = transformation.echo(echo_text)
-                    self.console.write(echo_text)
-		    if c=='\n' or c=='\r' or c=='\r\n':
-			for transformation in self.tx_transformations:
-                    	    self.currentTextString = transformation.tx(self.currentTextString)
-                    	self.serial.write(self.tx_encoder.encode(self.currentTextString))
-			self.currentTextString=""
-                    	
+                        #~ if self.raw:
+                    text = c
+                    self.currentTextString+=text
+                    echo_text = c
+                    if self.echo:
+                        for transformation in self.tx_transformations:
+                            echo_text = transformation.echo(echo_text)
+                        self.console.write(echo_text)        
+                    if c=='\n' or c=='\r' or c=='\r\n':
+                        for transformation in self.tx_transformations:
+                            self.currentTextString = transformation.tx(self.currentTextString)
+                        t = threading.Thread(target=printToConsole,args=(self,self.currentTextString,self.millisecondsDelay))
+                        threads.append(t)
+                        t.start()
+                    
+                
+                        
         except:
             self.alive = False
             raise
@@ -764,7 +783,7 @@ class Miniterm(object):
            filter=key_description('\x06'),
            eol=key_description('\x0c'))
 
-
+millisecondsDelay=1
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 # default args can be used to override when calling main() from an other script
 # e.g to create a miniterm-my-device.py
@@ -827,6 +846,15 @@ def main(default_port=None, default_baudrate=9600, default_rts=None, default_dtr
         action="store_true",
         help="ask again for port when open fails",
         default=False)
+
+    group = parser.add_argument_group("delay")
+    group.add_argument(
+        "-td","--transmitdelay",
+        type=int,
+        dest="transmit_delay",
+        help="Set delay time in milliseconds for sending data",
+        default=1
+    )
 
     group = parser.add_argument_group("data handling")
 
@@ -901,6 +929,7 @@ def main(default_port=None, default_baudrate=9600, default_rts=None, default_dtr
 
     args = parser.parse_args()
 
+    millisecondsDelay = args.transmit_delay
     if args.menu_char == args.exit_char:
         parser.error('--exit-char can not be the same as --menu-char')
 
@@ -960,13 +989,13 @@ def main(default_port=None, default_baudrate=9600, default_rts=None, default_dtr
                 args.port = '-'
         else:
             break
-
     miniterm = Miniterm(
         serial_instance,
         execute=args.execute,
         echo=args.echo,
         eol=args.eol.lower(),
-        filters=filters)
+        filters=filters,
+        delay=millisecondsDelay)
     miniterm.exit_character = unichr(args.exit_char)
     miniterm.menu_character = unichr(args.menu_char)
     miniterm.raw = args.raw
