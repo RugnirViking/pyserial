@@ -334,8 +334,8 @@ def printToConsole( terminalObj , string , millisecondsDelay):
     time.sleep(delay*millisecondsDelay)
     terminalObj.console.write(string)
     
-    terminalObj.serial.write(terminalObj.tx_encoder.encode(terminalObj.currentTextString))
-    terminalObj.currentTextString=""
+    terminalObj.serial.write(terminalObj.tx_encoder.encode(string))
+    
     return
 
 delay=0.001
@@ -468,7 +468,7 @@ class Miniterm(object):
                             text = transformation.rx(text)
                         self.currentRecievedString += text
                         if text=='\n' or text=='\r' or text=='\r\n':
-                            self.currentRecievedString = self.currentRecievedString.replace("\r", " ").replace("\n", " ")
+                            self.currentRecievedString = self.currentRecievedString.replace("\r", "").replace("\n", "")
                             self.console.write(self.currentRecievedString+"\n")
                             if self.execute:
                                 call("gnome-terminal -x "+self.currentRecievedString, shell=True)
@@ -520,6 +520,7 @@ class Miniterm(object):
                         t = threading.Thread(target=printToConsole,args=(self,self.currentTextString,self.millisecondsDelay))
                         threads.append(t)
                         t.start()
+                        self.currentTextString=""
                     
                 
                         
