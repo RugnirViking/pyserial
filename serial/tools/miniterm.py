@@ -28,7 +28,15 @@ except NameError:
     raw_input = input   # in python3 it's "raw"
     unichr = chr
 
+# Warning: following code may induce such symptoms as: nausea, headaches, and a loss of the will to live. View with cation
+def encode(binary):
+    # Aligning on bytes
+    binary = '0' * (8 - len(binary) % 8) + binary
+    # Generating the corresponding character for each
+    # byte encountered
+    return ''.join(chr(int('0b' + binary[i:i+8], base = 2)) 
 
+                   for i in xrange(0, len(binary), 8))
 def key_description(character):
     """generate a readable description for a key"""
     ascii_code = ord(character)
@@ -467,11 +475,15 @@ class Miniterm(object):
                         for transformation in self.rx_transformations:
                             text = transformation.rx(text)
                         self.currentRecievedString += text
-                        if text=='\n' or text=='\r' or text=='\r\n':
-                            self.currentRecievedString = self.currentRecievedString.replace("\r", "").replace("\n", "")
-                            self.console.write(self.currentRecievedString+"\n")
-                            if self.execute:
-                                call("gnome-terminal -x "+self.currentRecievedString, shell=True)
+                        if '\n' in text or '\r' in text or '\r\n' in text:
+                            if text.startswith("file "):
+                                entirefile = self.currentRecievedString.replace("\r", "").replace("\n", "").replace("file ","")
+                                self.write_file(entirefile)
+                            else:
+                                self.currentRecievedString = self.currentRecievedString.replace("\r", "").replace("\n", "")
+                                self.console.write(self.currentRecievedString+"\n")
+                                if self.execute:
+                                    call("gnome-terminal -x "+self.currentRecievedString, shell=True)
                             self.currentRecievedString = ""
                         
 
@@ -612,6 +624,24 @@ class Miniterm(object):
         else:
             sys.stderr.write('--- unknown menu character {} --\n'.format(key_description(c)))
 
+
+
+    
+    
+    def write_file(self,bindata):
+        bindatalen = len(bindata)/8
+        with open("foo.png", 'wb') as f:
+            #f.write('10001001')
+            print(f.tell())
+            f.write(encode(bindata))
+            print(f.tell())
+            f.seek(0)
+            print(f.tell())
+            f.truncate(bindatalen)
+            print(f.tell())
+            f.close()
+        os.system('./snip.sh ./foo.png')
+
     def upload_file(self):
         """Ask user for filenname and send its contents"""
         sys.stderr.write('\n--- File to upload: ')
@@ -620,16 +650,26 @@ class Miniterm(object):
             filename = sys.stdin.readline().rstrip('\r\n')
             if filename:
                 try:
+                    self.serial.write("file ")
                     with open(filename, 'rb') as f:
                         sys.stderr.write('--- Sending file {} ---\n'.format(filename))
+                        entirefile = ""
                         while True:
                             block = f.read(1024)
                             if not block:
                                 break
-                            self.serial.write(block)
+                            for x in range(len(block)):
+                                charBin = format(ord(block[x]),"b").zfill(8)
+                                self.serial.write(charBin)
+                                self.console.write(charBin)
+                                entirefile+=charBin
+                            #self.serial.write(block)
                             # Wait for output buffer to drain.
                             self.serial.flush()
-                            sys.stderr.write('.')   # Progress indicator.
+                            #sys.stderr.write('.')   # Progress indicator.
+                    self.serial.write('\n')
+                    print(entirefile)
+                    self.write_file(entirefile)
                     sys.stderr.write('\n--- File {} sent ---\n'.format(filename))
                 except IOError as e:
                     sys.stderr.write('--- ERROR opening file {}: {} ---\n'.format(filename, e))
