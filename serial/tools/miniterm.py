@@ -378,6 +378,7 @@ class Miniterm(object):
         self.millisecondsDelay = delay
         self.currentTextString = ""
         self.currentRecievedString = ""
+        self.recievingFile = False
 
     def _start_reader(self):
         """Start reader thread"""
@@ -470,20 +471,27 @@ class Miniterm(object):
                 if data:
                     if self.raw:
                         self.console.write_bytes(data)
-                    else:
-                        text = self.rx_decoder.decode(data)
-                        for transformation in self.rx_transformations:
-                            text = transformation.rx(text)
-                        self.currentRecievedString += text
-                        if '\n' in text or '\r' in text or '\r\n' in text:
-                            if text.startswith("file "):
-                                entirefile = self.currentRecievedString.replace("\r", "").replace("\n", "").replace("file ","")
-                                self.write_file(entirefile)
-                            else:
-                                self.currentRecievedString = self.currentRecievedString.replace("\r", "").replace("\n", "")
-                                self.console.write(self.currentRecievedString+"\n")
-                                if self.execute:
-                                    call("gnome-terminal -x "+self.currentRecievedString, shell=True)
+                    
+                    text = self.rx_decoder.decode(data)
+                    for transformation in self.rx_transformations:
+                        text = transformation.rx(text)
+                    self.currentRecievedString += text
+                    if 'file 'in self.currentRecievedString and not self.recievingFile==True:
+                        self.recievingFile = True
+                        self.console.write("  ---Recieving File Over Radio---  ")
+                    sizeOfFile = (len(self.currentRecievedString)/8)-len("file ")
+                    if self.recievingFile == True and sizeOfFile%1024==0:
+                        self.console.write("  # File # -> Size of file recieved: "+str(sizeOfFile)+"B\n")
+                    if '\n' in text or '\r' in text or '\r\n'in text:
+                        if self.currentRecievedString.startswith("file "):
+                            entirefile = self.currentRecievedString.replace("\r", "").replace("\n", "").replace("file ","")
+                            self.write_file(entirefile)
+                            self.recievingFile = False
+                        else:
+                            self.currentRecievedString = self.currentRecievedString.replace("\r", "").replace("\n", "")
+                            self.console.write(self.currentRecievedString+"\n")
+                            if self.execute:
+                                call("gnome-terminal -x "+self.currentRecievedString, shell=True)
                             self.currentRecievedString = ""
                         
 
@@ -630,17 +638,15 @@ class Miniterm(object):
     
     def write_file(self,bindata):
         bindatalen = len(bindata)/8
-        with open("foo.png", 'wb') as f:
+        filename = "foo.jpg"
+        with open(filename, 'wb') as f:
             #f.write('10001001')
-            print(f.tell())
             f.write(encode(bindata))
-            print(f.tell())
+            print("Wrote file to "+filename+" with size: "+str(f.tell()))
             f.seek(0)
-            print(f.tell())
             f.truncate(bindatalen)
-            print(f.tell())
             f.close()
-        os.system('./snip.sh ./foo.png')
+        os.system('./snip.sh ./'+filename)
 
     def upload_file(self):
         """Ask user for filenname and send its contents"""
@@ -655,10 +661,12 @@ class Miniterm(object):
                         sys.stderr.write('--- Sending file {} ---\n'.format(filename))
                         entirefile = ""
                         while True:
-                            block = f.read(1024)
+                            block = f.read(16)
+                            time.sleep(0.1)
                             if not block:
                                 break
                             for x in range(len(block)):
+                                self.serial.flush()
                                 charBin = format(ord(block[x]),"b").zfill(8)
                                 self.serial.write(charBin)
                                 self.console.write(charBin)
@@ -668,7 +676,7 @@ class Miniterm(object):
                             self.serial.flush()
                             #sys.stderr.write('.')   # Progress indicator.
                     self.serial.write('\n')
-                    print(entirefile)
+                    ##print(entirefile)
                     self.write_file(entirefile)
                     sys.stderr.write('\n--- File {} sent ---\n'.format(filename))
                 except IOError as e:
