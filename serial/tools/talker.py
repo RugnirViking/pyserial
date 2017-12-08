@@ -11,6 +11,16 @@ from serial.tools import hexlify_codec
 import time
 from std_msgs.msg import String
 
+
+receiver_thread=None
+def encode(binary):
+    # Aligning on bytes
+    binary = '0' * (8 - len(binary) % 8) + binary
+    # Generating the corresponding character for each
+    # byte encountered
+    return ''.join(chr(int('0b' + binary[i:i+8], base = 2)) 
+
+                   for i in xrange(0, len(binary), 8))
 def set_rx_encoding(encoding, errors='replace'):
     """set encoding for received data"""
     input_encoding = encoding
@@ -40,11 +50,30 @@ def ask_for_port():
         else:
             port = ports[index]
         return port
+def write_file(bindata,name,size):
+    bindatalen = len(bindata)/8
+    print("\nSize of recieved file: "+str(bindatalen)+" Size of original file: "+str(size)+"\n")
+    if int(bindatalen)!=int(size):
+        print("Since the file sizes were different, no changes have been made to preserve existing data")
+        return
+    filename = name
+    with open(filename, 'wb') as f:
+        #f.write('10001001')
+        f.write(encode(bindata))
+        print("Wrote file to "+filename+" with size: "+str(f.tell()))
+        f.seek(0)
+        f.truncate(bindatalen)
+        f.close()
+    os.system('./snip.sh ./'+filename)
+
 def talker(serial_port):
     pub = rospy.Publisher('chatter', String, queue_size=10)
     rospy.init_node('talker', anonymous=True)
     rate = rospy.Rate(20) # 10
     currentRecievedString = ""
+    currentFileName = ""
+    currentFileSize = 0
+    recievingFile=False
     rx_decoder = set_rx_encoding('UTF-8')
     #here there be dragons
     rate.sleep()
@@ -56,20 +85,56 @@ def talker(serial_port):
             data = serial_port.read(serial_port.in_waiting or 1)
             if data:
                 #if self.raw:
-                #    self.console.write_bytes(data)
+                #    rospy.loginfo_bytes(data)
                 #else:
                 #    text = self.rx_decoder.decode(data)
                 #    for transformation in self.rx_transformations:
                 #        text = transformation.rx(text)
                 text = rx_decoder.decode(data)
                 currentRecievedString += text
-                if '\n' in text or '\r' in text or '\r\n' in text:
-                    currentRecievedString = currentRecievedString.replace("\r", "").replace("\n", "")
-                    rospy.loginfo(currentRecievedString)
-                    pub.publish(currentRecievedString)
-                    #if self.execute:
-                    #    call("gnome-terminal -x "+self.currentRecievedString, shell=True)
-                    currentRecievedString = ""               
+                sizeOfFile = (len(currentRecievedString)/8)-len("file ")
+                if recievingFile == True and sizeOfFile%256==0:
+                    rospy.loginfo("  # File # -> Size of file recieved: "+str(sizeOfFile)+" B\n")
+                if '\n' in text or '\r' in text or '\r\n'in text:
+                    if currentRecievedString.startswith("file|"):
+                        recievingFile = True
+                        filedata = currentRecievedString.split("|")
+                        currentFileName = filedata[1]
+                        currentFileSize = filedata[2]
+                        rospy.loginfo("  ---Recieving File Over Radio---  Name: "+currentFileName+" Size: "+currentFileSize+" bytes")
+                        currentRecievedString = ""
+                    elif recievingFile == True:
+                        entirefile = currentRecievedString.replace("\r", "").replace("\n", "").replace("file|","")
+                        write_file(entirefile,currentFileName,currentFileSize)
+                        recievingFile = False
+                        currentRecievedString = ""
+                        currentFileName = ""
+                        currentFileSize = 0
+                    elif currentRecievedString.startswith("image"):
+                        # do some image stuff
+                        # a .sh file provided by nicolaj
+                        # compress the file
+                        # send it
+                        pass
+                    elif currentRecievedString.startswith("map"):
+                        # do some .sh file to get an image of a map
+                        # compress it?
+                        # send it
+                        pass
+                    else:
+                        currentRecievedString = currentRecievedString.replace("\r", "").replace("\n", "")
+                        rospy.loginfo(currentRecievedString+"\n")
+                        pub.publish(currentRecievedString)
+                        #if self.execute:
+                        #    call("gnome-terminal -x "+currentRecievedString, shell=True)
+                        currentRecievedString = ""
+                #if '\n' in text or '\r' in text or '\r\n' in text:
+                #    currentRecievedString = currentRecievedString.replace("\r", "").replace("\n", "")
+                #    rospy.loginfo(currentRecievedString)
+                #    pub.publish(currentRecievedString)
+                #    #if self.execute:
+                #    #    call("gnome-terminal -x "+currentRecievedString, shell=True)
+                #    currentRecievedString = ""               
         except serial.SerialException:
             raise       # XXX handle instead of re-raise?
         #  for legacy support, don't delete
