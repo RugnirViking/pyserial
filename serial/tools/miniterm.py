@@ -476,17 +476,25 @@ class Miniterm(object):
                     for transformation in self.rx_transformations:
                         text = transformation.rx(text)
                     self.currentRecievedString += text
-                    if 'file 'in self.currentRecievedString and not self.recievingFile==True:
-                        self.recievingFile = True
-                        self.console.write("  ---Recieving File Over Radio---  ")
+                    #if 'file 'in self.currentRecievedString and not self.recievingFile==True:
+                    #    self.recievingFile = True
+                    #    self.console.write("  ---Recieving File Over Radio---  ")
                     sizeOfFile = (len(self.currentRecievedString)/8)-len("file ")
-                    if self.recievingFile == True and sizeOfFile%1024==0:
-                        self.console.write("  # File # -> Size of file recieved: "+str(sizeOfFile)+"B\n")
+                    if self.recievingFile == True and sizeOfFile%256==0:
+                        self.console.write("  # File # -> Size of file recieved: "+str(sizeOfFile)+" B\n")
                     if '\n' in text or '\r' in text or '\r\n'in text:
                         if self.currentRecievedString.startswith("file "):
-                            entirefile = self.currentRecievedString.replace("\r", "").replace("\n", "").replace("file ","")
+                            self.recievingFile = True
+                            filedata = self.currentRecievedString.split("|")
+                            name = filedata[1]
+                            size = filedata[2]
+                            self.console.write("  ---Recieving File Over Radio---  Name: "+name+" Size: "+size+" bytes")
+                            self.currentRecievedString = ""
+                        if self.recievingFile == True:
+                            entirefile = self.currentRecievedString.replace("\r", "").replace("\n", "").replace("file|","")
                             self.write_file(entirefile)
                             self.recievingFile = False
+                            self.currentRecievedString = ""
                         else:
                             self.currentRecievedString = self.currentRecievedString.replace("\r", "").replace("\n", "")
                             self.console.write(self.currentRecievedString+"\n")
@@ -656,7 +664,9 @@ class Miniterm(object):
             filename = sys.stdin.readline().rstrip('\r\n')
             if filename:
                 try:
-                    self.serial.write("file ")
+                    stats = os.path.getsize(filename)
+                    self.serial.write("file|"+filename+"|"+str(stats)+"\n")
+                    self.console.write("Sending file: "+filename+" Size: "+str(stats)+" bytes\n")
                     with open(filename, 'rb') as f:
                         sys.stderr.write('--- Sending file {} ---\n'.format(filename))
                         entirefile = ""
