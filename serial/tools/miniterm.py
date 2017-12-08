@@ -483,14 +483,14 @@ class Miniterm(object):
                     if self.recievingFile == True and sizeOfFile%256==0:
                         self.console.write("  # File # -> Size of file recieved: "+str(sizeOfFile)+" B\n")
                     if '\n' in text or '\r' in text or '\r\n'in text:
-                        if self.currentRecievedString.startswith("file "):
+                        if self.currentRecievedString.startswith("file|"):
                             self.recievingFile = True
                             filedata = self.currentRecievedString.split("|")
                             name = filedata[1]
                             size = filedata[2]
                             self.console.write("  ---Recieving File Over Radio---  Name: "+name+" Size: "+size+" bytes")
                             self.currentRecievedString = ""
-                        if self.recievingFile == True:
+                        elif self.recievingFile == True:
                             entirefile = self.currentRecievedString.replace("\r", "").replace("\n", "").replace("file|","")
                             self.write_file(entirefile)
                             self.recievingFile = False
