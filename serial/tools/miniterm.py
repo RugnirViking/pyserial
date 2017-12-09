@@ -504,10 +504,12 @@ class Miniterm(object):
                             # a .sh file provided by nicolaj
                             # compress the file
                             # send it
+                            pass
                         elif self.currentRecievedString.startswith("map"):
                             # do some .sh file to get an image of a map
                             # compress it?
                             # send it
+                            pass
                         else:
                             self.currentRecievedString = self.currentRecievedString.replace("\r", "").replace("\n", "")
                             self.console.write(self.currentRecievedString+"\n")
