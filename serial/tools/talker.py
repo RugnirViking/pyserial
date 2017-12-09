@@ -13,6 +13,12 @@ from std_msgs.msg import String
 
 
 receiver_thread=None
+
+delay=0.001
+
+threads = []
+
+
 def encode(binary):
     # Aligning on bytes
     binary = '0' * (8 - len(binary) % 8) + binary
@@ -26,6 +32,12 @@ def set_rx_encoding(encoding, errors='replace'):
     input_encoding = encoding
     rx_decoder = codecs.getincrementaldecoder(encoding)(errors)
     return rx_decoder
+
+def set_tx_encoding(encoding, errors='replace'):
+    """set encoding for transmitted data"""
+    output_encoding = encoding
+    tx_encoder = codecs.getincrementalencoder(encoding)(errors)
+    return tx_encoder
 
 def ask_for_port():
     """\
@@ -66,6 +78,45 @@ def write_file(bindata,name,size):
         f.close()
     os.system('./snip.sh ./'+filename)
 
+def printToConsole(serial, tx_encoder , string , millisecondsDelay):
+    time.sleep(delay*millisecondsDelay)
+    rospy.loginfo(string)
+    
+    serial.write(tx_encoder.encode(string))
+    
+    return
+def upload_file(serial_port,filename):
+    if filename:
+        try:
+            stats = os.path.getsize(filename)
+            serial_port.write(("file|"+filename+"|"+str(stats)+"\n").encode("utf-8"))
+            rospy.loginfo("Sending file: "+filename+" Size: "+str(stats)+" bytes\n")
+            with open(filename, 'rb') as f:
+                sys.stderr.write('--- Sending file {} ---\n'.format(filename))
+                entirefile = ""
+                while True:
+                    block = f.read(16)
+                    time.sleep(0.1)
+                    if not block:
+                        break
+                    for x in range(len(block)):
+                        serial_port.flush()
+                        charBin = format(ord(block[x]),"b").zfill(8)
+                        serial_port.write(charBin)
+                        #rospy.loginfo(charBin)
+                        entirefile+=charBin
+                    #self.serial.write(block)
+                    # Wait for output buffer to drain.
+                    serial_port.flush()
+                    #sys.stderr.write('.')   # Progress indicator.
+            serial_port.write('\n')
+            ##print(entirefile)
+            #self.write_file(entirefile)
+            rospy.loginfo('\n--- File {} sent ---\n'.format(filename))
+        except IOError as e:
+            rospy.loginfo('--- ERROR opening file {}: {} ---\n'.format(filename, e))
+
+
 def talker(serial_port):
     pub = rospy.Publisher('chatter', String, queue_size=10)
     rospy.init_node('talker', anonymous=True)
@@ -73,8 +124,10 @@ def talker(serial_port):
     currentRecievedString = ""
     currentFileName = ""
     currentFileSize = 0
+    millisecondsDelay = 5000
     recievingFile=False
     rx_decoder = set_rx_encoding('UTF-8')
+    tx_encoder = set_tx_encoding('ASCII')
     #here there be dragons
     rate.sleep()
     rate.sleep()
@@ -96,6 +149,7 @@ def talker(serial_port):
                 if recievingFile == True and sizeOfFile%256==0:
                     rospy.loginfo("  # File # -> Size of file recieved: "+str(sizeOfFile)+" B\n")
                 if '\n' in text or '\r' in text or '\r\n'in text:
+                    currentRecievedString = currentRecievedString.replace("\r", "").replace("\n", "")
                     if currentRecievedString.startswith("file|"):
                         recievingFile = True
                         filedata = currentRecievedString.split("|")
@@ -115,11 +169,38 @@ def talker(serial_port):
                         # a .sh file provided by nicolaj
                         # compress the file
                         # send it
+                        currentRecievedString = ""
                         pass
                     elif currentRecievedString.startswith("map"):
                         # do some .sh file to get an image of a map
                         # compress it?
                         # send it
+                        currentRecievedString = ""
+                        pass
+                    elif currentRecievedString.startswith("echo"):
+                        args = currentRecievedString.split("|")
+                        if len(args)<2:
+                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] INFO: benis\n",millisecondsDelay))
+                            threads.append(t)
+                            t.start()
+                        else:
+                            message = args[1]
+                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] INFO: "+message+"\n",millisecondsDelay))
+                            threads.append(t)
+                            t.start()
+                        currentRecievedString = ""
+                        pass
+                    elif currentRecievedString.startswith("get"):
+                        # get a file
+                        args = currentRecievedString.split("|")
+                        if len(args)<2:
+                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] WARN: Did not get enough args for command: \"Get\"\n",millisecondsDelay))
+                            threads.append(t)
+                            t.start()
+                        else:
+                            filename = args[1]
+                            upload_file(serial_port,filename)
+                        currentRecievedString = ""
                         pass
                     else:
                         currentRecievedString = currentRecievedString.replace("\r", "").replace("\n", "")
