@@ -379,6 +379,8 @@ class Miniterm(object):
         self.currentTextString = ""
         self.currentRecievedString = ""
         self.recievingFile = False
+        self.currentFileName = ""
+        self.currentFileSize = 0
 
     def _start_reader(self):
         """Start reader thread"""
@@ -486,15 +488,26 @@ class Miniterm(object):
                         if self.currentRecievedString.startswith("file|"):
                             self.recievingFile = True
                             filedata = self.currentRecievedString.split("|")
-                            name = filedata[1]
-                            size = filedata[2]
-                            self.console.write("  ---Recieving File Over Radio---  Name: "+name+" Size: "+size+" bytes")
+                            self.currentFileName = filedata[1]
+                            self.currentFileSize = filedata[2]
+                            self.console.write("  ---Recieving File Over Radio---  Name: "+self.currentFileName+" Size: "+self.currentFileSize+" bytes")
                             self.currentRecievedString = ""
                         elif self.recievingFile == True:
                             entirefile = self.currentRecievedString.replace("\r", "").replace("\n", "").replace("file|","")
-                            self.write_file(entirefile)
+                            self.write_file(entirefile,self.currentFileName,self.currentFileSize)
                             self.recievingFile = False
                             self.currentRecievedString = ""
+                            self.currentFileName = ""
+                            self.currentFileSize = 0
+                        elif self.currentRecievedString.startswith("image"):
+                            # do some image stuff
+                            # a .sh file provided by nicolaj
+                            # compress the file
+                            # send it
+                        elif self.currentRecievedString.startswith("map"):
+                            # do some .sh file to get an image of a map
+                            # compress it?
+                            # send it
                         else:
                             self.currentRecievedString = self.currentRecievedString.replace("\r", "").replace("\n", "")
                             self.console.write(self.currentRecievedString+"\n")
@@ -644,9 +657,13 @@ class Miniterm(object):
 
     
     
-    def write_file(self,bindata):
+    def write_file(self,bindata,name,size):
         bindatalen = len(bindata)/8
-        filename = "foo.jpg"
+        print("\nSize of recieved file: "+str(bindatalen)+" Size of original file: "+str(size)+"\n")
+        if int(bindatalen)!=int(size):
+            print("Since the file sizes were different, no changes have been made to preserve existing data")
+            return
+        filename = name
         with open(filename, 'wb') as f:
             #f.write('10001001')
             f.write(encode(bindata))
@@ -687,7 +704,7 @@ class Miniterm(object):
                             #sys.stderr.write('.')   # Progress indicator.
                     self.serial.write('\n')
                     ##print(entirefile)
-                    self.write_file(entirefile)
+                    #self.write_file(entirefile)
                     sys.stderr.write('\n--- File {} sent ---\n'.format(filename))
                 except IOError as e:
                     sys.stderr.write('--- ERROR opening file {}: {} ---\n'.format(filename, e))
