@@ -1,5 +1,12 @@
 #!/usr/bin/env python
-import rospy
+#
+# Very simple serial terminal
+#
+# This file is part of pySerial. https://github.com/pyserial/pyserial
+# (C)2002-2015 Chris Liechti <cliechti@gmx.net>
+#
+# SPDX-License-Identifier:    BSD-3-Clause
+
 import codecs
 import os
 import sys
@@ -9,19 +16,19 @@ import serial
 from serial.tools.list_ports import comports
 from serial.tools import hexlify_codec
 import time
-from std_msgs.msg import String
 
+# pylint: disable=wrong-import-order,wrong-import-position
 
-receiver_thread=None
+codecs.register(lambda c: hexlify_codec.getregentry() if c == 'hexlify' else None)
 
-delay=0.001
+try:
+    raw_input
+except NameError:
+    # pylint: disable=redefined-builtin,invalid-name
+    raw_input = input   # in python3 it's "raw"
+    unichr = chr
 
-threads = []
-
-fileSend_blockInterval = 0.1
-
-millisecondsDelay = 1
-
+# Warning: following code may induce such symptoms as: nausea, headaches, and a loss of the will to live. View with cation
 def encode(binary):
     # Aligning on bytes
     binary = '0' * (8 - len(binary) % 8) + binary
@@ -30,18 +37,284 @@ def encode(binary):
     return ''.join(chr(int('0b' + binary[i:i+8], base = 2)) 
 
                    for i in xrange(0, len(binary), 8))
-def set_rx_encoding(encoding, errors='replace'):
-    """set encoding for received data"""
-    input_encoding = encoding
-    rx_decoder = codecs.getincrementaldecoder(encoding)(errors)
-    return rx_decoder
+def key_description(character):
+    """generate a readable description for a key"""
+    ascii_code = ord(character)
+    if ascii_code < 32:
+        return 'Ctrl+{:c}'.format(ord('@') + ascii_code)
+    else:
+        return repr(character)
 
-def set_tx_encoding(encoding, errors='replace'):
-    """set encoding for transmitted data"""
-    output_encoding = encoding
-    tx_encoder = codecs.getincrementalencoder(encoding)(errors)
-    return tx_encoder
 
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+class ConsoleBase(object):
+    """OS abstraction for console (input/output codec, no echo)"""
+
+    def __init__(self):
+        if sys.version_info >= (3, 0):
+            self.byte_output = sys.stdout.buffer
+        else:
+            self.byte_output = sys.stdout
+        self.output = sys.stdout
+
+    def setup(self):
+        """Set console to read single characters, no echo"""
+
+    def cleanup(self):
+        """Restore default console settings"""
+
+    def getkey(self):
+        """Read a single key from the console"""
+        return None
+
+    def write_bytes(self, byte_string):
+        """Write bytes (already encoded)"""
+        self.byte_output.write(byte_string)
+        self.byte_output.flush()
+
+    def write(self, text):
+        """Write string"""
+        self.output.write(text)
+        self.output.flush()
+
+    def cancel(self):
+        """Cancel getkey operation"""
+
+    #  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -  -
+    # context manager:
+    # switch terminal temporary to normal mode (e.g. to get user input)
+
+    def __enter__(self):
+        self.cleanup()
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        self.setup()
+
+
+if os.name == 'nt':  # noqa
+    import msvcrt
+    import ctypes
+
+    class Out(object):
+        """file-like wrapper that uses os.write"""
+
+        def __init__(self, fd):
+            self.fd = fd
+
+        def flush(self):
+            pass
+
+        def write(self, s):
+            os.write(self.fd, s)
+
+    class Console(ConsoleBase):
+        def __init__(self):
+            super(Console, self).__init__()
+            self._saved_ocp = ctypes.windll.kernel32.GetConsoleOutputCP()
+            self._saved_icp = ctypes.windll.kernel32.GetConsoleCP()
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            ctypes.windll.kernel32.SetConsoleCP(65001)
+            self.output = codecs.getwriter('UTF-8')(Out(sys.stdout.fileno()), 'replace')
+            # the change of the code page is not propagated to Python, manually fix it
+            sys.stderr = codecs.getwriter('UTF-8')(Out(sys.stderr.fileno()), 'replace')
+            sys.stdout = self.output
+            self.output.encoding = 'UTF-8'  # needed for input
+
+        def __del__(self):
+            ctypes.windll.kernel32.SetConsoleOutputCP(self._saved_ocp)
+            ctypes.windll.kernel32.SetConsoleCP(self._saved_icp)
+
+        def getkey(self):
+            while True:
+                z = msvcrt.getwch()
+                if z == unichr(13):
+                    return unichr(10)
+                elif z in (unichr(0), unichr(0x0e)):    # functions keys, ignore
+                    msvcrt.getwch()
+                else:
+                    return z
+
+        def cancel(self):
+            # CancelIo, CancelSynchronousIo do not seem to work when using
+            # getwch, so instead, send a key to the window with the console
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            ctypes.windll.user32.PostMessageA(hwnd, 0x100, 0x0d, 0)
+
+elif os.name == 'posix':
+    import atexit
+    import termios
+    import fcntl
+
+    class Console(ConsoleBase):
+        def __init__(self):
+            super(Console, self).__init__()
+            self.fd = sys.stdin.fileno()
+            self.old = termios.tcgetattr(self.fd)
+            atexit.register(self.cleanup)
+            if sys.version_info < (3, 0):
+                self.enc_stdin = codecs.getreader(sys.stdin.encoding)(sys.stdin)
+            else:
+                self.enc_stdin = sys.stdin
+
+        def setup(self):
+            new = termios.tcgetattr(self.fd)
+            new[3] = new[3] & ~termios.ICANON & ~termios.ECHO & ~termios.ISIG
+            new[6][termios.VMIN] = 1
+            new[6][termios.VTIME] = 0
+            termios.tcsetattr(self.fd, termios.TCSANOW, new)
+
+        def getkey(self):
+            c = self.enc_stdin.read(1)
+            if c == unichr(0x7f):
+                c = unichr(8)    # map the BS key (which yields DEL) to backspace
+            return c
+
+        def cancel(self):
+            fcntl.ioctl(self.fd, termios.TIOCSTI, b'\0')
+
+        def cleanup(self):
+            termios.tcsetattr(self.fd, termios.TCSAFLUSH, self.old)
+
+else:
+    raise NotImplementedError(
+        'Sorry no implementation for your platform ({}) available.'.format(sys.platform))
+
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
+class Transform(object):
+    """do-nothing: forward all data unchanged"""
+    def rx(self, text):
+        """text received from serial port"""
+        return text
+
+    def tx(self, text):
+        """text to be sent to serial port"""
+        return text
+
+    def echo(self, text):
+        """text to be sent but displayed on console"""
+        return text
+
+
+class CRLF(Transform):
+    """ENTER sends CR+LF"""
+
+    def tx(self, text):
+        return text.replace('\n', '\r\n')
+
+
+class CR(Transform):
+    """ENTER sends CR"""
+
+    def rx(self, text):
+        return text.replace('\r', '\n')
+
+    def tx(self, text):
+        return text.replace('\n', '\r')
+
+
+class LF(Transform):
+    """ENTER sends LF"""
+
+
+class NoTerminal(Transform):
+    """remove typical terminal control codes from input"""
+
+    REPLACEMENT_MAP = dict((x, 0x2400 + x) for x in range(32) if unichr(x) not in '\r\n\b\t')
+    REPLACEMENT_MAP.update(
+        {
+            0x7F: 0x2421,  # DEL
+            0x9B: 0x2425,  # CSI
+        })
+
+    def rx(self, text):
+        return text.translate(self.REPLACEMENT_MAP)
+
+    echo = rx
+
+
+class NoControls(NoTerminal):
+    """Remove all control codes, incl. CR+LF"""
+
+    REPLACEMENT_MAP = dict((x, 0x2400 + x) for x in range(32))
+    REPLACEMENT_MAP.update(
+        {
+            0x20: 0x2423,  # visual space
+            0x7F: 0x2421,  # DEL
+            0x9B: 0x2425,  # CSI
+        })
+
+
+class Printable(Transform):
+    """Show decimal code for all non-ASCII characters and replace most control codes"""
+
+    def rx(self, text):
+        r = []
+        for c in text:
+            if ' ' <= c < '\x7f' or c in '\r\n\b\t':
+                r.append(c)
+            elif c < ' ':
+                r.append(unichr(0x2400 + ord(c)))
+            else:
+                r.extend(unichr(0x2080 + ord(d) - 48) for d in '{:d}'.format(ord(c)))
+                r.append(' ')
+        return ''.join(r)
+
+    echo = rx
+
+
+class Colorize(Transform):
+    """Apply different colors for received and echo"""
+
+    def __init__(self):
+        # XXX make it configurable, use colorama?
+        self.input_color = '\x1b[37m'
+        self.echo_color = '\x1b[31m'
+
+    def rx(self, text):
+        return self.input_color + text
+
+    def echo(self, text):
+        return self.echo_color + text
+
+
+class DebugIO(Transform):
+    """Print what is sent and received"""
+
+    def rx(self, text):
+        sys.stderr.write(' [RX:{!r}] '.format(text))
+        sys.stderr.flush()
+        return text
+
+    def tx(self, text):
+        sys.stderr.write(' [TX:{!r}] '.format(text))
+        sys.stderr.flush()
+        return text
+
+
+# other ideas:
+# - add date/time for each newline
+# - insert newline after: a) timeout b) packet end character
+
+EOL_TRANSFORMATIONS = {
+    'crlf': CRLF,
+    'cr': CR,
+    'lf': LF,
+}
+
+TRANSFORMATIONS = {
+    'direct': Transform,    # no transformation
+    'default': NoTerminal,
+    'nocontrol': NoControls,
+    'printable': Printable,
+    'colorize': Colorize,
+    'debug': DebugIO,
+}
+
+
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 def ask_for_port():
     """\
     Show a list of ports and ask the user for a choice. To make selection
@@ -65,210 +338,541 @@ def ask_for_port():
         else:
             port = ports[index]
         return port
-def write_file(bindata,name,size):
-    bindatalen = len(bindata)/8
-    print("\nSize of recieved file: "+str(bindatalen)+" Size of original file: "+str(size)+"\n")
-    if int(bindatalen)!=int(size):
-        print("Since the file sizes were different, no changes have been made to preserve existing data")
-        return
-    filename = name
-    with open(filename, 'wb') as f:
-        #f.write('10001001')
-        f.write(encode(bindata))
-        print("Wrote file to "+filename+" with size: "+str(f.tell()))
-        f.seek(0)
-        f.truncate(bindatalen)
-        f.close()
-    os.system('./snip.sh ./'+filename)
-
-def printToConsole(serial, tx_encoder , string , millisecondsDelay):
+def printToConsole( terminalObj , string , millisecondsDelay):
     time.sleep(delay*millisecondsDelay)
-    rospy.loginfo(string)
+    terminalObj.console.write(string)
     
-    serial.write(tx_encoder.encode(string))
+    terminalObj.serial.write(terminalObj.tx_encoder.encode(string))
     
     return
-def upload_file(serial_port,filename):
-    if filename:
-        try:
-            stats = os.path.getsize(filename)
-            serial_port.write(("file|"+filename+"|"+str(stats)+"\n").encode("utf-8"))
-            rospy.loginfo("Sending file: "+filename+" Size: "+str(stats)+" bytes\n")
-            rospy.loginfo("Interval: "+str(fileSend_blockInterval))
-            with open(filename, 'rb') as f:
-                sys.stderr.write('--- Sending file {} ---\n'.format(filename))
-                entirefile = ""
-                while True:
-                    block = f.read(1024)
-                    #rospy.loginfo("---------------------------------BEFORE")
-                    #time.sleep(fileSend_blockInterval)
-                    #rospy.loginfo("AFTER")
-                    if not block:
-                        break
-                    for x in range(len(block)):
-                        #serial_port.flush()
-                        charBin = format(ord(block[x]),"b").zfill(8)
-                        serial_port.write(charBin)
-                        #rospy.loginfo(charBin)
-                        entirefile+=charBin
-                    #self.serial.write(block)
-                    # Wait for output buffer to drain.
-                    #serial_port.flush()
-                    #sys.stderr.write('.')   # Progress indicator.
-            serial_port.write('\n')
-            rospy.loginfo('\n--- File {} sent ---\n'.format(filename))
-        except IOError as e:
-            rospy.loginfo('--- ERROR opening file {}: {} ---\n'.format(filename, e))
 
-def set_block_interval(userInputInterval,serial_port,tx_encoder):
-    global fileSend_blockInterval
-    block_interval = 1.0
-    try:
-        block_interval = float(userInputInterval)
-        rospy.loginfo("Setting block interval: "+str(block_interval)+" from "+userInputInterval)
-        fileSend_blockInterval = block_interval
-    except ValueError:
-        t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] WARN: First arg has to be a decimal \"set_block_interval\"",millisecondsDelay))
-        threads.append(t)
-        t.start()
-        return
+delay=0.001
 
-def talker(serial_port):
-    pub = rospy.Publisher('chatter', String, queue_size=10)
-    rospy.init_node('talker', anonymous=True)
-    rate = rospy.Rate(20) # 10
-    currentRecievedString = ""
-    currentFileName = ""
-    currentFileSize = 0
-    recievingFile=False
-    rx_decoder = set_rx_encoding('UTF-8')
-    tx_encoder = set_tx_encoding('ASCII')
-    #here there be dragons
-    rate.sleep()
-    rate.sleep()
-    while not rospy.is_shutdown():
-        #hello_str = "hello world %s" % rospy.get_time()
+threads = []
+
+
+class Miniterm(object):
+    """\
+    Terminal application. Copy data from serial port to console and vice versa.
+    Handle special keys from the console to show menu etc.
+    """
+
+    def __init__(self, serial_instance, execute=False, echo=False, eol='crlf', filters=(),delay=1):
+        self.console = Console()
+        self.serial = serial_instance
+        self.execute = execute
+        self.echo = echo
+        self.raw = False
+        self.input_encoding = 'UTF-8'
+        self.output_encoding = 'UTF-8'
+        self.eol = eol
+        self.filters = filters
+        self.update_transformations()
+        self.exit_character = 0x1d  # GS/CTRL+]
+        self.menu_character = 0x14  # Menu: CTRL+T
+        self.alive = None
+        self._reader_alive = None
+        self.receiver_thread = None
+        self.rx_decoder = None
+        self.tx_decoder = None
+        self.millisecondsDelay = delay
+        self.currentTextString = ""
+        self.currentRecievedString = ""
+        self.recievingFile = False
+        self.currentFileName = ""
+        self.currentFileSize = 0
+
+    def _start_reader(self):
+        """Start reader thread"""
+        self._reader_alive = True
+        # start serial->console thread
+        self.receiver_thread = threading.Thread(target=self.reader, name='rx')
+        self.receiver_thread.daemon = True
+        self.receiver_thread.start()
+
+    def _stop_reader(self):
+        """Stop reader thread only, wait for clean exit of thread"""
+        self._reader_alive = False
+        if hasattr(self.serial, 'cancel_read'):
+            self.serial.cancel_read()
+        self.receiver_thread.join()
+
+    def start(self):
+        """start worker threads"""
+        self.alive = True
+        self._start_reader()
+        # enter console->serial loop
+        self.transmitter_thread = threading.Thread(target=self.writer, name='tx')
+        self.transmitter_thread.daemon = True
+        self.transmitter_thread.start()
+        self.console.setup()
+
+    def stop(self):
+        """set flag to stop worker threads"""
+        self.alive = False
+
+    def join(self, transmit_only=False):
+        """wait for worker threads to terminate"""
+        self.transmitter_thread.join()
+        if not transmit_only:
+            if hasattr(self.serial, 'cancel_read'):
+                self.serial.cancel_read()
+            self.receiver_thread.join()
+
+    def close(self):
+        self.serial.close()
+
+    def update_transformations(self):
+        """take list of transformation classes and instantiate them for rx and tx"""
+        transformations = [EOL_TRANSFORMATIONS[self.eol]] + [TRANSFORMATIONS[f]
+                                                             for f in self.filters]
+        self.tx_transformations = [t() for t in transformations]
+        self.rx_transformations = list(reversed(self.tx_transformations))
+
+    def set_rx_encoding(self, encoding, errors='replace'):
+        """set encoding for received data"""
+        self.input_encoding = encoding
+        self.rx_decoder = codecs.getincrementaldecoder(encoding)(errors)
+
+    def set_tx_encoding(self, encoding, errors='replace'):
+        """set encoding for transmitted data"""
+        self.output_encoding = encoding
+        self.tx_encoder = codecs.getincrementalencoder(encoding)(errors)
+
+    def dump_port_settings(self):
+        """Write current settings to sys.stderr"""
+        sys.stderr.write("\n--- Settings: {p.name}  {p.baudrate},{p.bytesize},{p.parity},{p.stopbits}\n".format(
+            p=self.serial))
+        sys.stderr.write('--- RTS: {:8}  DTR: {:8}  BREAK: {:8}\n'.format(
+            ('active' if self.serial.rts else 'inactive'),
+            ('active' if self.serial.dtr else 'inactive'),
+            ('active' if self.serial.break_condition else 'inactive')))
         try:
-            # read all that is there or wait for one byte
-            data = serial_port.read(serial_port.in_waiting or 1)
-            if data:
-                #if self.raw:
-                #    rospy.loginfo_bytes(data)
-                #else:
-                #    text = self.rx_decoder.decode(data)
-                #    for transformation in self.rx_transformations:
-                #        text = transformation.rx(text)
-                text = rx_decoder.decode(data)
-                currentRecievedString += text
-                sizeOfFile = (len(currentRecievedString)/8)-len("file ")
-                if recievingFile == True and sizeOfFile%256==0:
-                    rospy.loginfo("  # File # -> Size of file recieved: "+str(sizeOfFile)+" B\n")
-                if '\n' in text or '\r' in text or '\r\n'in text:
-                    currentRecievedString = currentRecievedString.replace("\r", "").replace("\n", "")
-                    if currentRecievedString.startswith("file|"):
-                        recievingFile = True
-                        filedata = currentRecievedString.split("|")
-                        currentFileName = filedata[1]
-                        currentFileSize = filedata[2]
-                        rospy.loginfo("  ---Recieving File Over Radio---  Name: "+currentFileName+" Size: "+currentFileSize+" bytes")
-                        currentRecievedString = ""
-                    elif recievingFile == True:
-                        entirefile = currentRecievedString.replace("\r", "").replace("\n", "").replace("file|","")
-                        write_file(entirefile,currentFileName,currentFileSize)
-                        recievingFile = False
-                        currentRecievedString = ""
-                        currentFileName = ""
-                        currentFileSize = 0
-                    elif currentRecievedString.startswith("image"):
-                        # do some image stuff
-                        # a .sh file provided by nicolaj
-                        # compress the file
-                        # send it
-                        os.system('./screenshot.sh')
-                        os.system('./minify.sh tempScreenshot.jpg smallScreenshot.jpg 30')
-                        upload_file(serial_port,'smallScreenshot.jpg')
-                        currentRecievedString = ""
-                        pass
-                    elif currentRecievedString.startswith("set_block_interval"):
-                        # set block interval (increase/decrease error rate)
-                        args = currentRecievedString.split("|")
-                        if len(args)<2:
-                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] WARN: Did not get enough args for command: \"set_block_interval\""+message+"\n",millisecondsDelay))
-                            threads.append(t)
-                            t.start()
-                        else:
-                            set_block_interval(args[1],serial_port,tx_encoder)
-                        currentRecievedString = ""
-                        pass
-                    elif currentRecievedString.startswith("map"):
-                        # do some .sh file to get an image of a map
-                        # compress it?
-                        # send it
-                        os.system('./getMap.sh tempMap')
-                        os.system('./minify.sh tempMap.pgm compresedMap.jpg 70')
-                        upload_file(serial_port,'compresedMap.jpg')
-                        currentRecievedString = ""
-                        pass
-                    elif set_block_interval.startswith("map"):
-                        # do some .sh file to get an image of a map
-                        # compress it?
-                        # send it
-                        args = currentRecievedString.split("|")
-                        if len(args)<2:
-                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] WARN: Did not get enough args for command: \"set_block_interval\""+message+"\n",millisecondsDelay))
-                            threads.append(t)
-                            t.start()
-                        
-                        os.system("gnome-terminal -x "+currentRecievedString)
-                        pass
-                    elif currentRecievedString.startswith("echo"):
-                        args = currentRecievedString.split("|")
-                        if len(args)<2:
-                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] INFO: benis\n",millisecondsDelay))
-                            threads.append(t)
-                            t.start()
-                        else:
-                            message = args[1]
-                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] INFO: "+message+"\n",millisecondsDelay))
-                            threads.append(t)
-                            t.start()
-                        currentRecievedString = ""
-                        pass
-                    elif currentRecievedString.startswith("get"):
-                        # get a file
-                        args = currentRecievedString.split("|")
-                        if len(args)<2:
-                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] WARN: Did not get enough args for command: \"Get\"\n",millisecondsDelay))
-                            threads.append(t)
-                            t.start()
-                        else:
-                            filename = args[1]
-                            upload_file(serial_port,filename)
-                        currentRecievedString = ""
-                        pass
-                    else:
-                        currentRecievedString = currentRecievedString.replace("\r", "").replace("\n", "")
-                        rospy.loginfo(currentRecievedString+"\n")
-                        pub.publish(currentRecievedString)
-                        #if self.execute:
-                        #    call("gnome-terminal -x "+currentRecievedString, shell=True)
-                        currentRecievedString = ""
-                #if '\n' in text or '\r' in text or '\r\n' in text:
-                #    currentRecievedString = currentRecievedString.replace("\r", "").replace("\n", "")
-                #    rospy.loginfo(currentRecievedString)
-                #    pub.publish(currentRecievedString)
-                #    #if self.execute:
-                #    #    call("gnome-terminal -x "+currentRecievedString, shell=True)
-                #    currentRecievedString = ""               
+            sys.stderr.write('--- CTS: {:8}  DSR: {:8}  RI: {:8}  CD: {:8}\n'.format(
+                ('active' if self.serial.cts else 'inactive'),
+                ('active' if self.serial.dsr else 'inactive'),
+                ('active' if self.serial.ri else 'inactive'),
+                ('active' if self.serial.cd else 'inactive')))
         except serial.SerialException:
-            raise       # XXX handle instead of re-raise?
-        #  for legacy support, don't delete
-        #  serial_port.write("benis\n")
-        ##rospy.loginfo(hello_str)
-        #pub.publish(hello_str)
-        rate.sleep()
+            # on RFC 2217 ports, it can happen if no modem state notification was
+            # yet received. ignore this error.
+            pass
+        sys.stderr.write('--- software flow control: {}\n'.format('active' if self.serial.xonxoff else 'inactive'))
+        sys.stderr.write('--- hardware flow control: {}\n'.format('active' if self.serial.rtscts else 'inactive'))
+        sys.stderr.write('--- serial input encoding: {}\n'.format(self.input_encoding))
+        sys.stderr.write('--- serial output encoding: {}\n'.format(self.output_encoding))
+        sys.stderr.write('--- EOL: {}\n'.format(self.eol.upper()))
+        sys.stderr.write('--- filters: {}\n'.format(' '.join(self.filters)))
 
+    def reader(self):
+        """loop and copy serial->console"""
+        try:
+            while self.alive and self._reader_alive:
+                # read all that is there or wait for one byte
+                data = self.serial.read(self.serial.in_waiting or 1)
+                if data:
+                    if self.raw:
+                        self.console.write_bytes(data)
+                    
+                    text = self.rx_decoder.decode(data)
+                    for transformation in self.rx_transformations:
+                        text = transformation.rx(text)
+                    self.currentRecievedString += text
+                    #if 'file 'in self.currentRecievedString and not self.recievingFile==True:
+                    #    self.recievingFile = True
+                    #    self.console.write("  ---Recieving File Over Radio---  ")
+                    sizeOfFile = (len(self.currentRecievedString)/8)-len("file ")
+                    if self.recievingFile == True and sizeOfFile%256==0:
+                        self.console.write("  # File # -> Size of file recieved: "+str(sizeOfFile)+" B\n")
+                    if '\n' in text or '\r' in text or '\r\n'in text:
+                        if self.currentRecievedString.startswith("file|"):
+                            self.recievingFile = True
+                            filedata = self.currentRecievedString.split("|")
+
+                            self.currentFileName = filedata[1]
+                            fileSizeSplit = filedata[2].split("\n")
+                            self.currentFileSize = fileSizeSplit[0]
+                            self.console.write("  ---Recieving File Over Radio---  Name: "+self.currentFileName+" Size: "+self.currentFileSize+" bytes")
+                            if len(fileSizeSplit)>1:
+                                self.currentRecievedString = fileSizeSplit[1]
+                            else:
+                                self.currentRecievedString = ""
+                        elif self.recievingFile == True:
+                            entirefile = self.currentRecievedString.replace("\r", "").replace("\n", "").replace("file|","")
+                            self.write_file(entirefile,self.currentFileName,self.currentFileSize)
+                            self.recievingFile = False
+                            self.currentRecievedString = ""
+                            self.currentFileName = ""
+                            self.currentFileSize = 0
+                        elif self.currentRecievedString.startswith("image"):
+                            # do some image stuff
+                            # a .sh file provided by nicolaj
+                            # compress the file
+                            # send it
+                            pass
+                        elif self.currentRecievedString.startswith("map"):
+                            # do some .sh file to get an image of a map
+                            # compress it?
+                            # send it
+                            pass
+                        else:
+                            self.currentRecievedString = self.currentRecievedString.replace("\r", "").replace("\n", "")
+                            self.console.write(self.currentRecievedString+"\n")
+                            if self.execute:
+                                call("gnome-terminal -x "+self.currentRecievedString, shell=True)
+                            self.currentRecievedString = ""
+                        
+
+
+                        
+        except serial.SerialException:
+            self.alive = False
+            self.console.cancel()
+            raise       # XXX handle instead of re-raise?
+
+    def writer(self):
+        """\
+        Loop and copy console->serial until self.exit_character character is
+        found. When self.menu_character is found, interpret the next key
+        locally.
+        """
+        menu_active = False
+        try:
+            while self.alive:
+                try:
+                    c = self.console.getkey()
+                except KeyboardInterrupt:
+                    c = '\x03'
+                if not self.alive:
+                    break
+                if menu_active:
+                    self.handle_menu_key(c)
+                    menu_active = False
+                elif c == self.menu_character:
+                    menu_active = True      # next char will be for menu
+                elif c == self.exit_character:
+                    self.stop()             # exit app
+                    break
+                else:
+                        #~ if self.raw:
+                    text = c
+                    self.currentTextString+=text
+                    echo_text = c
+                    if self.echo:
+                        for transformation in self.tx_transformations:
+                            echo_text = transformation.echo(echo_text)
+                        self.console.write(echo_text)        
+                    if c=='\n' or c=='\r' or c=='\r\n':
+                        for transformation in self.tx_transformations:
+                            self.currentTextString = transformation.tx(self.currentTextString)
+                        t = threading.Thread(target=printToConsole,args=(self,self.currentTextString,self.millisecondsDelay))
+                        threads.append(t)
+                        t.start()
+                        self.currentTextString=""
+                    
+                
+                        
+        except:
+            self.alive = False
+            raise
+
+    def handle_menu_key(self, c):
+        """Implement a simple menu / settings"""
+        if c == self.menu_character or c == self.exit_character:
+            # Menu/exit character again -> send itself
+            self.serial.write(self.tx_encoder.encode(c))
+            if self.echo:
+                self.console.write(c)
+        elif c == '\x15':                       # CTRL+U -> upload file
+            self.upload_file()
+        elif c in '\x08hH?':                    # CTRL+H, h, H, ? -> Show help
+            sys.stderr.write(self.get_help_text())
+        elif c == '\x12':                       # CTRL+R -> Toggle RTS
+            self.serial.rts = not self.serial.rts
+            sys.stderr.write('--- RTS {} ---\n'.format('active' if self.serial.rts else 'inactive'))
+        elif c == '\x04':                       # CTRL+D -> Toggle DTR
+            self.serial.dtr = not self.serial.dtr
+            sys.stderr.write('--- DTR {} ---\n'.format('active' if self.serial.dtr else 'inactive'))
+        elif c == '\x02':                       # CTRL+B -> toggle BREAK condition
+            self.serial.break_condition = not self.serial.break_condition
+            sys.stderr.write('--- BREAK {} ---\n'.format('active' if self.serial.break_condition else 'inactive'))
+        elif c == '\x05':                       # CTRL+E -> toggle local echo
+            self.echo = not self.echo
+            sys.stderr.write('--- local echo {} ---\n'.format('active' if self.echo else 'inactive'))
+        elif c == '\x06':                       # CTRL+F -> edit filters
+            self.change_filter()
+        elif c == '\x0c':                       # CTRL+L -> EOL mode
+            modes = list(EOL_TRANSFORMATIONS)  # keys
+            eol = modes.index(self.eol) + 1
+            if eol >= len(modes):
+                eol = 0
+            self.eol = modes[eol]
+            sys.stderr.write('--- EOL: {} ---\n'.format(self.eol.upper()))
+            self.update_transformations()
+        elif c == '\x01':                       # CTRL+A -> set encoding
+            self.change_encoding()
+        elif c == '\x09':                       # CTRL+I -> info
+            self.dump_port_settings()
+        #~ elif c == '\x01':                       # CTRL+A -> cycle escape mode
+        #~ elif c == '\x0c':                       # CTRL+L -> cycle linefeed mode
+        elif c in 'pP':                         # P -> change port
+            self.change_port()
+        elif c in 'sS':                         # S -> suspend / open port temporarily
+            self.suspend_port()
+        elif c in 'bB':                         # B -> change baudrate
+            self.change_baudrate()
+        elif c == '8':                          # 8 -> change to 8 bits
+            self.serial.bytesize = serial.EIGHTBITS
+            self.dump_port_settings()
+        elif c == '7':                          # 7 -> change to 8 bits
+            self.serial.bytesize = serial.SEVENBITS
+            self.dump_port_settings()
+        elif c in 'eE':                         # E -> change to even parity
+            self.serial.parity = serial.PARITY_EVEN
+            self.dump_port_settings()
+        elif c in 'oO':                         # O -> change to odd parity
+            self.serial.parity = serial.PARITY_ODD
+            self.dump_port_settings()
+        elif c in 'mM':                         # M -> change to mark parity
+            self.serial.parity = serial.PARITY_MARK
+            self.dump_port_settings()
+        elif c in 'sS':                         # S -> change to space parity
+            self.serial.parity = serial.PARITY_SPACE
+            self.dump_port_settings()
+        elif c in 'nN':                         # N -> change to no parity
+            self.serial.parity = serial.PARITY_NONE
+            self.dump_port_settings()
+        elif c == '1':                          # 1 -> change to 1 stop bits
+            self.serial.stopbits = serial.STOPBITS_ONE
+            self.dump_port_settings()
+        elif c == '2':                          # 2 -> change to 2 stop bits
+            self.serial.stopbits = serial.STOPBITS_TWO
+            self.dump_port_settings()
+        elif c == '3':                          # 3 -> change to 1.5 stop bits
+            self.serial.stopbits = serial.STOPBITS_ONE_POINT_FIVE
+            self.dump_port_settings()
+        elif c in 'xX':                         # X -> change software flow control
+            self.serial.xonxoff = (c == 'X')
+            self.dump_port_settings()
+        elif c in 'rR':                         # R -> change hardware flow control
+            self.serial.rtscts = (c == 'R')
+            self.dump_port_settings()
+        else:
+            sys.stderr.write('--- unknown menu character {} --\n'.format(key_description(c)))
+
+
+
+    
+    
+    def write_file(self,bindata,name,size):
+        bindatalen = len(bindata)/8
+        print("\nSize of recieved file: "+str(bindatalen)+" Size of original file: "+str(size)+"\n")
+        if int(bindatalen)!=int(size):
+            print("Since the file sizes were different, no changes have been made to preserve existing data")
+            return
+        filename = name
+        with open(filename, 'wb') as f:
+            #f.write('10001001')
+            f.write(encode(bindata))
+            print("Wrote file to "+filename+" with size: "+str(f.tell()))
+            f.seek(0)
+            f.truncate(bindatalen)
+            f.close()
+        os.system('./snip.sh ./'+filename)
+
+    def upload_file(self):
+        """Ask user for filenname and send its contents"""
+        sys.stderr.write('\n--- File to upload: ')
+        sys.stderr.flush()
+        with self.console:
+            filename = sys.stdin.readline().rstrip('\r\n')
+            if filename:
+                try:
+                    stats = os.path.getsize(filename)
+                    self.serial.write("file|"+filename+"|"+str(stats)+"\n")
+                    self.console.write("Sending file: "+filename+" Size: "+str(stats)+" bytes\n")
+                    with open(filename, 'rb') as f:
+                        sys.stderr.write('--- Sending file {} ---\n'.format(filename))
+                        entirefile = ""
+                        while True:
+                            block = f.read(16)
+                            time.sleep(0.1)
+                            if not block:
+                                break
+                            for x in range(len(block)):
+                                self.serial.flush()
+                                charBin = format(ord(block[x]),"b").zfill(8)
+                                self.serial.write(charBin)
+                                self.console.write(charBin)
+                                entirefile+=charBin
+                            #self.serial.write(block)
+                            # Wait for output buffer to drain.
+                            self.serial.flush()
+                            #sys.stderr.write('.')   # Progress indicator.
+                    self.serial.write('\n')
+                    ##print(entirefile)
+                    #self.write_file(entirefile)
+                    sys.stderr.write('\n--- File {} sent ---\n'.format(filename))
+                except IOError as e:
+                    sys.stderr.write('--- ERROR opening file {}: {} ---\n'.format(filename, e))
+
+    def change_filter(self):
+        """change the i/o transformations"""
+        sys.stderr.write('\n--- Available Filters:\n')
+        sys.stderr.write('\n'.join(
+            '---   {:<10} = {.__doc__}'.format(k, v)
+            for k, v in sorted(TRANSFORMATIONS.items())))
+        sys.stderr.write('\n--- Enter new filter name(s) [{}]: '.format(' '.join(self.filters)))
+        with self.console:
+            new_filters = sys.stdin.readline().lower().split()
+        if new_filters:
+            for f in new_filters:
+                if f not in TRANSFORMATIONS:
+                    sys.stderr.write('--- unknown filter: {!r}\n'.format(f))
+                    break
+            else:
+                self.filters = new_filters
+                self.update_transformations()
+        sys.stderr.write('--- filters: {}\n'.format(' '.join(self.filters)))
+
+    def change_encoding(self):
+        """change encoding on the serial port"""
+        sys.stderr.write('\n--- Enter new encoding name [{}]: '.format(self.input_encoding))
+        with self.console:
+            new_encoding = sys.stdin.readline().strip()
+        if new_encoding:
+            try:
+                codecs.lookup(new_encoding)
+            except LookupError:
+                sys.stderr.write('--- invalid encoding name: {}\n'.format(new_encoding))
+            else:
+                self.set_rx_encoding(new_encoding)
+                self.set_tx_encoding(new_encoding)
+        sys.stderr.write('--- serial input encoding: {}\n'.format(self.input_encoding))
+        sys.stderr.write('--- serial output encoding: {}\n'.format(self.output_encoding))
+
+    def change_baudrate(self):
+        """change the baudrate"""
+        sys.stderr.write('\n--- Baudrate: ')
+        sys.stderr.flush()
+        with self.console:
+            backup = self.serial.baudrate
+            try:
+                self.serial.baudrate = int(sys.stdin.readline().strip())
+            except ValueError as e:
+                sys.stderr.write('--- ERROR setting baudrate: {} ---\n'.format(e))
+                self.serial.baudrate = backup
+            else:
+                self.dump_port_settings()
+
+    def change_port(self):
+        """Have a conversation with the user to change the serial port"""
+        with self.console:
+            try:
+                port = ask_for_port()
+            except KeyboardInterrupt:
+                port = None
+        if port and port != self.serial.port:
+            # reader thread needs to be shut down
+            self._stop_reader()
+            # save settings
+            settings = self.serial.getSettingsDict()
+            try:
+                new_serial = serial.serial_for_url(port, do_not_open=True)
+                # restore settings and open
+                new_serial.applySettingsDict(settings)
+                new_serial.rts = self.serial.rts
+                new_serial.dtr = self.serial.dtr
+                new_serial.open()
+                new_serial.break_condition = self.serial.break_condition
+            except Exception as e:
+                sys.stderr.write('--- ERROR opening new port: {} ---\n'.format(e))
+                new_serial.close()
+            else:
+                self.serial.close()
+                self.serial = new_serial
+                sys.stderr.write('--- Port changed to: {} ---\n'.format(self.serial.port))
+            # and restart the reader thread
+            self._start_reader()
+
+    def suspend_port(self):
+        """\
+        open port temporarily, allow reconnect, exit and port change to get
+        out of the loop
+        """
+        # reader thread needs to be shut down
+        self._stop_reader()
+        self.serial.close()
+        sys.stderr.write('\n--- Port closed: {} ---\n'.format(self.serial.port))
+        do_change_port = False
+        while not self.serial.is_open:
+            sys.stderr.write('--- Quit: {exit} | p: port change | any other key to reconnect ---\n'.format(
+                exit=key_description(self.exit_character)))
+            k = self.console.getkey()
+            if k == self.exit_character:
+                self.stop()             # exit app
+                break
+            elif k in 'pP':
+                do_change_port = True
+                break
+            try:
+                self.serial.open()
+            except Exception as e:
+                sys.stderr.write('--- ERROR opening port: {} ---\n'.format(e))
+        if do_change_port:
+            self.change_port()
+        else:
+            # and restart the reader thread
+            self._start_reader()
+            sys.stderr.write('--- Port opened: {} ---\n'.format(self.serial.port))
+
+    def get_help_text(self):
+        """return the help text"""
+        # help text, starts with blank line!
+        return """
+--- pySerial ({version}) - miniterm - help
+---
+--- {exit:8} Exit program
+--- {menu:8} Menu escape key, followed by:
+--- Menu keys:
+---    {menu:7} Send the menu character itself to remote
+---    {exit:7} Send the exit character itself to remote
+---    {info:7} Show info
+---    {upload:7} Upload file (prompt will be shown)
+---    {repr:7} encoding
+---    {filter:7} edit filters
+--- Toggles:
+---    {rts:7} RTS   {dtr:7} DTR   {brk:7} BREAK
+---    {echo:7} echo  {eol:7} EOL
+---
+--- Port settings ({menu} followed by the following):
+---    p          change port
+---    7 8        set data bits
+---    N E O S M  change parity (None, Even, Odd, Space, Mark)
+---    1 2 3      set stop bits (1, 2, 1.5)
+---    b          change baud rate
+---    x X        disable/enable software flow control
+---    r R        disable/enable hardware flow control
+""".format(version=getattr(serial, 'VERSION', 'unknown version'),
+           exit=key_description(self.exit_character),
+           menu=key_description(self.menu_character),
+           rts=key_description('\x12'),
+           dtr=key_description('\x04'),
+           brk=key_description('\x02'),
+           echo=key_description('\x05'),
+           info=key_description('\x09'),
+           upload=key_description('\x15'),
+           repr=key_description('\x01'),
+           filter=key_description('\x06'),
+           eol=key_description('\x0c'))
+
+millisecondsDelay=1
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+# default args can be used to override when calling main() from an other script
+# e.g to create a miniterm-my-device.py
 def main(default_port=None, default_baudrate=9600, default_rts=None, default_dtr=None):
+    """Command line tool, entry point"""
+
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -407,6 +1011,23 @@ def main(default_port=None, default_baudrate=9600, default_rts=None, default_dtr
         default=False)
 
     args = parser.parse_args()
+
+    millisecondsDelay = args.transmit_delay
+    if args.menu_char == args.exit_char:
+        parser.error('--exit-char can not be the same as --menu-char')
+
+    if args.filter:
+        if 'help' in args.filter:
+            sys.stderr.write('Available filters:\n')
+            sys.stderr.write('\n'.join(
+                '{:<10} = {.__doc__}'.format(k, v)
+                for k, v in sorted(TRANSFORMATIONS.items())))
+            sys.stderr.write('\n')
+            sys.exit(1)
+        filters = args.filter
+    else:
+        filters = ['default']
+
     while True:
         # no port given on command line -> ask user now
         if args.port is None or args.port == '-':
@@ -451,14 +1072,38 @@ def main(default_port=None, default_baudrate=9600, default_rts=None, default_dtr
                 args.port = '-'
         else:
             break
+    miniterm = Miniterm(
+        serial_instance,
+        execute=args.execute,
+        echo=args.echo,
+        eol=args.eol.lower(),
+        filters=filters,
+        delay=millisecondsDelay)
+    miniterm.exit_character = unichr(args.exit_char)
+    miniterm.menu_character = unichr(args.menu_char)
+    miniterm.raw = args.raw
+    miniterm.set_rx_encoding(args.serial_port_encoding)
+    miniterm.set_tx_encoding(args.serial_port_encoding)
 
-    
-    talker(serial_port=serial_instance)
-    
-if __name__ == '__main__':
+    if not args.quiet:
+        sys.stderr.write('--- Miniterm on {p.name}  {p.baudrate},{p.bytesize},{p.parity},{p.stopbits} ---\n'.format(
+            p=miniterm.serial))
+        sys.stderr.write('--- Quit: {} | Menu: {} | Help: {} followed by {} ---\n'.format(
+            key_description(miniterm.exit_character),
+            key_description(miniterm.menu_character),
+            key_description(miniterm.menu_character),
+            key_description('\x08')))
+
+    miniterm.start()
     try:
-        main()
-        #talker()
-    except rospy.ROSInterruptException:
+        miniterm.join(True)
+    except KeyboardInterrupt:
         pass
+    if not args.quiet:
+        sys.stderr.write("\n--- exit ---\n")
+    miniterm.join()
+    miniterm.close()
 
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+if __name__ == '__main__':
+    main()
