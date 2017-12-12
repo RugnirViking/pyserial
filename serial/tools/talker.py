@@ -18,6 +18,9 @@ delay=0.001
 
 threads = []
 
+fileSend_blockInterval = 0.1
+
+millisecondsDelay = 1
 
 def encode(binary):
     # Aligning on bytes
@@ -91,31 +94,44 @@ def upload_file(serial_port,filename):
             stats = os.path.getsize(filename)
             serial_port.write(("file|"+filename+"|"+str(stats)+"\n").encode("utf-8"))
             rospy.loginfo("Sending file: "+filename+" Size: "+str(stats)+" bytes\n")
+            rospy.loginfo("Interval: "+str(fileSend_blockInterval))
             with open(filename, 'rb') as f:
                 sys.stderr.write('--- Sending file {} ---\n'.format(filename))
                 entirefile = ""
                 while True:
-                    block = f.read(16)
-                    time.sleep(0.1)
+                    block = f.read(1024)
+                    #rospy.loginfo("---------------------------------BEFORE")
+                    #time.sleep(fileSend_blockInterval)
+                    #rospy.loginfo("AFTER")
                     if not block:
                         break
                     for x in range(len(block)):
-                        serial_port.flush()
+                        #serial_port.flush()
                         charBin = format(ord(block[x]),"b").zfill(8)
                         serial_port.write(charBin)
                         #rospy.loginfo(charBin)
                         entirefile+=charBin
                     #self.serial.write(block)
                     # Wait for output buffer to drain.
-                    serial_port.flush()
+                    #serial_port.flush()
                     #sys.stderr.write('.')   # Progress indicator.
             serial_port.write('\n')
-            ##print(entirefile)
-            #self.write_file(entirefile)
             rospy.loginfo('\n--- File {} sent ---\n'.format(filename))
         except IOError as e:
             rospy.loginfo('--- ERROR opening file {}: {} ---\n'.format(filename, e))
 
+def set_block_interval(userInputInterval,serial_port,tx_encoder):
+    global fileSend_blockInterval
+    block_interval = 1.0
+    try:
+        block_interval = float(userInputInterval)
+        rospy.loginfo("Setting block interval: "+str(block_interval)+" from "+userInputInterval)
+        fileSend_blockInterval = block_interval
+    except ValueError:
+        t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] WARN: First arg has to be a decimal \"set_block_interval\"",millisecondsDelay))
+        threads.append(t)
+        t.start()
+        return
 
 def talker(serial_port):
     pub = rospy.Publisher('chatter', String, queue_size=10)
@@ -124,7 +140,6 @@ def talker(serial_port):
     currentRecievedString = ""
     currentFileName = ""
     currentFileSize = 0
-    millisecondsDelay = 5000
     recievingFile=False
     rx_decoder = set_rx_encoding('UTF-8')
     tx_encoder = set_tx_encoding('ASCII')
@@ -169,13 +184,42 @@ def talker(serial_port):
                         # a .sh file provided by nicolaj
                         # compress the file
                         # send it
+                        os.system('./screenshot.sh')
+                        os.system('./minify.sh tempScreenshot.jpg smallScreenshot.jpg 30')
+                        upload_file(serial_port,'smallScreenshot.jpg')
+                        currentRecievedString = ""
+                        pass
+                    elif currentRecievedString.startswith("set_block_interval"):
+                        # set block interval (increase/decrease error rate)
+                        args = currentRecievedString.split("|")
+                        if len(args)<2:
+                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] WARN: Did not get enough args for command: \"set_block_interval\""+message+"\n",millisecondsDelay))
+                            threads.append(t)
+                            t.start()
+                        else:
+                            set_block_interval(args[1],serial_port,tx_encoder)
                         currentRecievedString = ""
                         pass
                     elif currentRecievedString.startswith("map"):
                         # do some .sh file to get an image of a map
                         # compress it?
                         # send it
+                        os.system('./getMap.sh tempMap')
+                        os.system('./minify.sh tempMap.pgm compresedMap.jpg 70')
+                        upload_file(serial_port,'compresedMap.jpg')
                         currentRecievedString = ""
+                        pass
+                    elif set_block_interval.startswith("map"):
+                        # do some .sh file to get an image of a map
+                        # compress it?
+                        # send it
+                        args = currentRecievedString.split("|")
+                        if len(args)<2:
+                            t = threading.Thread(target=printToConsole,args=(serial_port,tx_encoder,"[Turtle] WARN: Did not get enough args for command: \"set_block_interval\""+message+"\n",millisecondsDelay))
+                            threads.append(t)
+                            t.start()
+                        
+                        os.system("gnome-terminal -x "+currentRecievedString)
                         pass
                     elif currentRecievedString.startswith("echo"):
                         args = currentRecievedString.split("|")
