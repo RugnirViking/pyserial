@@ -466,6 +466,7 @@ class Miniterm(object):
 
     def reader(self):
         """loop and copy serial->console"""
+        fileStringSize = ""
         try:
             while self.alive and self._reader_alive:
                 # read all that is there or wait for one byte
@@ -482,8 +483,9 @@ class Miniterm(object):
                     #    self.recievingFile = True
                     #    self.console.write("  ---Recieving File Over Radio---  ")
                     sizeOfFile = (len(self.currentRecievedString)/8)-len("file ")
-                    if self.recievingFile == True and sizeOfFile%256==0:
+                    if self.recievingFile == True and sizeOfFile%256==0 and not str(sizeOfFile)==fileStringSize:
                         self.console.write("  # File # -> Size of file recieved: "+str(sizeOfFile)+" B\n")
+                        fileStringSize = str(sizeOfFile)
                     if '\n' in text or '\r' in text or '\r\n'in text:
                         if self.currentRecievedString.startswith("file|"):
                             self.recievingFile = True
@@ -503,6 +505,7 @@ class Miniterm(object):
                             self.recievingFile = False
                             self.currentRecievedString = ""
                             self.currentFileName = ""
+                            fileStringSize = ""
                             self.currentFileSize = 0
                         elif self.currentRecievedString.startswith("image"):
                             # do some image stuff
