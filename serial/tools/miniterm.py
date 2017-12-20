@@ -698,13 +698,13 @@ class Miniterm(object):
                         sys.stderr.write('--- Sending file {} ---\n'.format(filename))
                         entirefile = ""
                         while True:
-                            block = f.read(16)
+                            block = f.read(1024)
                             time.sleep(0.1)
                             if not block:
                                 break
-                            for x in range(len(block)):
+                            for x in range(len(block)): # x here is the individual byte character of the file
                                 self.serial.flush()
-                                charBin = format(ord(block[x]),"b").zfill(8)
+                                charBin = format(ord(block[x]),"b").zfill(8) # convert the char into a binary number. fill it to eight characters string with zeros to avoid automatic number trimming
                                 self.serial.write(charBin)
                                 self.console.write(charBin)
                                 entirefile+=charBin
